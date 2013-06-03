@@ -1,0 +1,842 @@
+#include <directed_exploration/mapprocessing/ogmap.h>
+#include <directed_exploration/mapprocessing/mapexception.h>
+
+#include <cmath>
+#include <cstring>
+#include <cfloat>
+#include <iostream>
+#include <string>
+#include <sstream>
+
+#include <time.h>
+
+#include <queue>
+
+#include <opencv/highgui.h>
+
+#define TOPLEFT     1
+#define TOPRIGHT    2
+#define BOTTOMLEFT  3
+#define BOTTOMRIGHT 4
+
+using namespace mapprocessing;
+
+OgMap::OgMap( double offsetX, double offsetY, int width, int height, double resolution, const unsigned char* mapdata, double obs_inflation_dis, double frontier_clearance_dis )
+{
+	int j,k;
+	
+	this->width = width;
+	this->height = height;
+
+	this->offsetX = offsetX;
+	this->offsetY = offsetY;
+
+	metersPerCellX = resolution;
+	metersPerCellY = resolution;
+
+	initMap(width, height);
+
+	data = new unsigned char*[height];
+	for(int k = 0; k < height; k++ )
+	{
+		data[k] = new unsigned char[width];
+	}
+
+	j = k = 0;
+	unsigned int data_len = width*height;
+	for( unsigned int i = 0; i < data_len; i++ )
+	{
+		data[j][k] = mapdata[i];		
+		k++;
+		if(k == width)
+		{
+			k = 0;
+			j++;
+		}
+	}
+
+	char* miData = getMapAsSingleArray();
+	mapImage = new MapImage( miData, width, height, metersPerCellX, metersPerCellY, obs_inflation_dis, frontier_clearance_dis );
+	delete miData;
+}
+
+OgMap::OgMap( unsigned char** mapData, int width, int height, double metersPerCellX, double metersPerCellY, double obs_inflation_dis, double frontier_clearance_dis )
+{
+	this->width = width;
+	this->height = height;
+	this->metersPerCellX = metersPerCellX;
+	this->metersPerCellY = metersPerCellY;
+
+	this->data = mapData;
+
+	initMap(width, height);
+
+	char* miData = getMapAsSingleArray();
+	mapImage = new MapImage( miData, width, height, metersPerCellX, metersPerCellY, obs_inflation_dis, frontier_clearance_dis );
+	delete  miData;
+}
+
+void
+OgMap::initMap(int width, int height)
+{
+	visit = new bool*[height];
+	father = new CvPoint*[height];
+	distances = new double*[height];
+	for(int k = 0; k < height; k++ )
+	{
+		distances[k] = new double[width];
+		visit[k] = new bool[width];
+		father[k] = new CvPoint[width];
+	}
+}
+
+OgMap::~OgMap()
+{
+	delete mapImage;
+	
+	int i;
+	for( i = 0; i < height; i++ )
+	{
+		delete data[i];
+		delete distances[i];
+		delete visit[i];
+		delete father[i];
+	}
+
+	delete [] data;
+	delete [] distances;
+	delete [] visit;
+	delete [] father;
+}
+
+/* offsets are in map coordinates */
+OgMap*
+OgMap::getSubOgMap(double offsetX, double offsetY, double widthm, double heightm)
+{	
+	int widthI, heightI;
+	int i, j;
+
+	int offsetCellX = ceil(( offsetX - this->offsetX )/metersPerCellX);
+	int offsetCellY = ceil(( offsetY - this->offsetY )/metersPerCellY);
+
+//	std::cout << "offsets : " << offsetCellX << ", " << offsetCellY << std::endl;
+
+	int widthCalib = 0;
+	int heightCalib = 0;
+	if( offsetCellX < 0 )  
+	{
+		widthCalib = offsetCellX;
+		offsetCellX = 0;
+	}
+	else if( offsetCellX >= width ) // if the offset exceeds the upper boundary, no sub map can be retrieved
+	{
+		return NULL;
+	}
+
+	if( offsetCellY < 0 )
+	{
+		heightCalib = offsetCellY;
+		offsetCellY = 0;
+	}
+	else if( offsetCellY >= height )
+		return NULL;
+
+	widthI = (int)ceil(widthm/metersPerCellX) + widthCalib;
+	heightI = (int)ceil(heightm/metersPerCellY) + heightCalib;
+
+//	std::cout << "size : " << widthI << ", " << heightI << std::endl;
+
+	if( widthI <= 0 || heightI <= 0 )
+		return NULL;
+
+	// set the upper bounds for widthI and heightI
+	if( offsetCellX + widthI > this->width )
+		widthI = this->width - offsetCellX;
+	if( offsetCellY + heightI > this->height )
+		heightI = this->height - offsetCellY;
+	
+	unsigned char** subMapData = new unsigned char*[heightI];
+	for( i = 0; i < heightI; i++ )
+	{
+		subMapData[i] = new unsigned char[widthI];
+		memset(subMapData[i], 0, widthI);
+	}
+
+ 	for( i = 0; i < heightI; i++)
+ 	{
+ 		for( j = 0; j < widthI; j++ )
+ 		{
+ 			subMapData[i][j] = data[i+offsetCellY][j+offsetCellX];
+ 		}
+ 	}
+
+	OgMap* subMap = new OgMap( subMapData, widthI, heightI, metersPerCellX, metersPerCellY, obs_inflation_dis, frontier_clearance_dis );
+	subMap->offsetX = (offsetCellX)*metersPerCellX + this->offsetX;
+	subMap->offsetY = (offsetCellY)*metersPerCellY + this->offsetY;
+// 	subMap->metersPerCellX = this->metersPerCellX;
+// 	subMap->metersPerCellY = this->metersPerCellY;
+
+// 	std::cout << "submap size    : " << subMap->width << ", " << subMap->height << std::endl;
+// 	std::cout << "submap offsets : " << subMap->offsetX << ", " << subMap->offsetY << std::endl;	
+
+	return subMap;
+}
+
+/* here all parameters are assumed correct, no bound checking is done */
+OgMap*
+OgMap::getSubOgMap( int offsetX, int offsetY, int widthI, int heightI )
+{
+	int i, j;
+
+	unsigned char** subMapData = new unsigned char*[heightI];
+	for( i = 0; i < height; i++ )
+	{
+		subMapData[i] = new unsigned char[widthI];
+	}
+
+	for( i = 0; i < heightI; i++)
+	{
+		for( j = 0; j < widthI; j++ )
+		{
+			subMapData[i][j] = data[i+offsetX][j+offsetY];
+		}
+	}
+
+	OgMap* subMap = new OgMap( subMapData, widthI, heightI, metersPerCellX, metersPerCellY, obs_inflation_dis, frontier_clearance_dis );
+	subMap->offsetX = offsetX;
+	subMap->offsetY = offsetY;
+	subMap->metersPerCellX = this->metersPerCellX;
+	subMap->metersPerCellY = this->metersPerCellY;
+	
+	return subMap;
+}
+
+char*
+OgMap::getMapAsSingleArray()
+{
+	char* arr = new char[width*height];
+
+	int k = 0;
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+			arr[k++] = data[i][j];
+		}
+	}
+
+	return arr;
+}
+
+int
+OgMap::getWidth()
+{
+	return width;
+}
+
+int
+OgMap::getHeight()
+{
+	return height;
+}
+
+float
+OgMap::getOffsetX()
+{
+	return offsetX;
+}
+
+float
+OgMap::getOffsetY()
+{
+	return offsetY;
+}
+
+float
+OgMap::getMetersPerCellX()
+{
+	return metersPerCellX;
+}
+
+float
+OgMap::getMetersPerCellY()
+{
+	return metersPerCellY;
+}
+	
+MapImage*
+OgMap::getMapImage()
+{
+	return mapImage;
+}
+
+Vector2d
+OgMap::converFromImgToGlobalCoordinates(CvPoint & point)
+{
+	double xo = offsetX;
+	double yo = offsetY;
+
+	double xInMeters = (point.x)*metersPerCellX;
+	double yInMeters = (point.y)*metersPerCellY;
+
+	Vector2d globalFrontierPoint;
+
+	globalFrontierPoint.x = xo + xInMeters;
+	globalFrontierPoint.y = yo + yInMeters;
+
+	return globalFrontierPoint;
+}
+
+double
+OgMap::euclideanDistance(double x1, double y1, double x2, double y2)
+{
+	return sqrt( (x1-x2)*(x1-x2) + (y1-y2)*(y1-y2) );
+}
+
+bool
+OgMap::isInsideNeighborhood(double targetX, double targetY, double refX, double refY, double radius)
+{
+	double distance;
+
+	distance = sqrt( (targetX - refX)*(targetX - refX) +
+					 (targetY - refY)*(targetY - refY) );
+
+	if( distance < radius )
+		return true;
+	else
+		return false;
+}
+
+/* xpos and ypos are zero based positions */
+Vector2d
+OgMap::getPositionInMeters(int xpos, int ypos)
+{
+	Vector2d pose;
+	pose.x = offsetX + (xpos)*metersPerCellX;
+	pose.y = offsetY + (ypos)*metersPerCellY;
+	return pose;
+}
+
+CvPoint
+OgMap::getPositionInPixelPoints(Vector2d p)
+{
+	CvPoint pp;
+	pp.x = (int)floor(( p.x - this->offsetX )/metersPerCellX);
+	pp.y = (int)floor(( p.y - this->offsetY )/metersPerCellY);
+	return pp;
+}
+
+void
+OgMap::updateMap(const unsigned char* data)
+{
+		
+}
+
+void
+OgMap::getFrontiers(std::vector<Vector2d> & frontiers)
+{
+	std::vector<CvPoint> fs;
+	mapImage->getFrontiers(fs);
+
+	for(unsigned int i = 0; i < fs.size(); i++)
+	{
+		//Vector2d v = converFromImgToGlobalCoordinates(fs[i]);
+		Vector2d v = getPositionInMeters(fs[i].x, fs[i].y);
+		frontiers.push_back(v);
+	}
+}
+
+// overloading < operators for shortest path
+bool operator< (const std::pair<double,CvPoint> & a, const std::pair<double,CvPoint> & b)
+{
+	return a.first < b.first;
+}
+
+bool operator> (const std::pair<double,CvPoint> & a, const std::pair<double,CvPoint> & b)
+{
+	return a.first > b.first;
+}
+
+void
+OgMap::calculateShortestDistances(const Vector2d & pos)
+{
+ 	std::priority_queue<std::pair<double,CvPoint>,
+ 		std::vector<std::pair<double,CvPoint> >,
+ 		std::less<std::vector<std::pair<double,CvPoint> >::value_type> > q;  // prority queue used to order the points accordint to their shortest distances
+
+//	std::queue<std::pair<double,CvPoint> > q;
+	
+//	std::cout << "pos : " << pos.x << "," << pos.y << std::endl;
+	CvPoint fromTemp = getPositionInPixelPoints(pos);  // the robot's point from which shortest distances are calculated
+//	std::cout << "calculating distance from : " << fromTemp.x << "," << fromTemp.y << std::endl;
+//	std::cout << "width : " << width << ", height : " << height << std::endl;
+
+	const char* obsDataTemp = mapImage->getObsDilatedMapData();
+ 	char* obsData = new char[width*height];
+ 	memcpy(obsData, obsDataTemp, width*height);
+	
+	int mi; // index to obsData array
+
+	std::vector<CvPoint> from;
+	int tempRadius = 0.55/metersPerCellX;
+	bool done = false;
+	for(int i = -tempRadius; i <= tempRadius; i++)
+	{
+		for(int j = -tempRadius; j < tempRadius; j++)
+		{
+			CvPoint tf;
+			tf.x = fromTemp.x + j;
+			tf.y = fromTemp.y + i;
+			if(tf.x < 0 || tf.x > width-1 || tf.y < 0 || tf.y > height-1)
+				continue;
+			mi = tf.y*width + tf.x;
+			if( (unsigned char)obsData[mi] <= 130)
+			{
+				from.push_back(tf);
+				done = true;
+				break;
+			}			
+		}
+		if(done)
+			break;
+	}
+
+//	std::cout << "no in from : " << from.size() << std::endl;
+	
+// 	int range = 6;
+// 	while( mapImage->checkForFreeCell(fromTemp, range, from) == false )
+// 	{
+// 		range++;
+// 		if( range > 10 )
+// 		{
+// 			std::cout << "Cannot find a free cell to start calculating shortest distances...strange!" << std::endl;
+// 			throw MapException("Cannot find a free cell to start calculating shortest distances...strage!");
+// 		}
+// 	}
+	
+//	if( mapImage->checkForFreeCell(fromTemp, 6, from) == false )  //
+//		from = fromTemp;
+
+	unsigned char** marked = new unsigned char*[height];
+	for(int i = 0; i < height; i++)
+	{
+		marked[i] = new unsigned char[width];  // lookup table that stores the points whose shortest distances are calculated
+		memset(marked[i], 0, width);
+	}
+	int dx[] = {-1,0,1};                  // two arrays used to generate the 8 neighbours a point
+	int dy[] = {-1,0,1};
+
+	double l = sqrt(2.0);                 // distances between cells, l for diagonal and s for straight
+	double s = 1.0;
+
+	for(int i = 0; i < height; i++)       // initialize distances and father arrays
+	{
+		for(int j = 0; j < width; j++)
+		{
+			distances[i][j] = DBL_MAX;
+			father[i][j] = cvPoint(-1,-1);
+		}
+	}	
+
+	std::vector<CvPoint>::iterator tfit;
+	for(tfit = from.begin(); tfit != from.end(); tfit++)
+	{
+		CvPoint p = *tfit;
+		distances[p.y][p.x] = 0;
+		q.push(std::pair<double,CvPoint>(0,p));  // add initial position as a point to fringe
+		marked[p.y][p.x] = 1;                 // mark the current point
+	}
+//  	for(int i = 0; i < 3; i++)
+//  	{
+//  		CvPoint temp;
+//  		temp.y = from.y + dy[i];
+//  		for(int j = 0; j < 3; j++)
+//  		{			
+//  			temp.x = from.x + dx[j];
+// 			if( data[temp.y][temp.x] < 73 )
+// 				obsData[temp.y*width + temp.x] = (unsigned char)data[temp.y][temp.x];			
+//  		}
+//  	}
+
+	std::pair<double,CvPoint> p;
+	while( !q.empty() )    
+	{
+		p = q.top();                            // get the marked point with the lowest distance value
+		//p = q.front();
+		q.pop();
+
+		for(int i = 0; i < 3; i++)              // now generate the 8 neighbors
+		{
+			for(int j = 0; j < 3; j++)
+			{
+				CvPoint newP;
+				newP.x = p.second.x + dx[j];
+				newP.y = p.second.y + dy[i];
+
+				if( newP.x < 0 || newP.x > width-1 || newP.y < 0 || newP.y > height-1)
+					continue;  // enforcing boundaries
+
+				if( marked[newP.y][newP.x] == 1 )   // if a neighbor is already marked, no need to update its distance because its distance is already its shortest distance
+					continue;
+
+				int sum = abs(dx[j]) + abs(dy[i]);  // if not, find out the shortest distance from this point to the neighbor
+				double dis;
+				if( sum == 2 )
+					dis = l;    // l is the original
+				else if ( sum == 1)
+					dis = s;
+				else
+					continue;   // this happens when dx=0, dy=0 is used, but program execution doesn't come here as this point is already marked
+
+				mi = newP.y*width + newP.x;
+// 				if( data[newP.y][newP.x] > 73 )     // if point is not free space, distance is infinite
+// 					dis = DBL_MAX;
+				// change the above to include the free space also
+				if( (unsigned char)obsData[mi] > 73 )     // if point is occupied space or unknown space, distance is infinite
+				{
+ 					dis = DBL_MAX;
+				}
+
+				double newDis;
+				if( dis == DBL_MAX )
+				{
+					marked[newP.y][newP.x] = 1;
+					continue;
+				}
+				else
+				{
+					newDis = -dis + p.first; // p.first is negative, so effectively we are adding negatives
+				}
+				
+				q.push(std::pair<double,CvPoint>(newDis,newP));
+				distances[newP.y][newP.x] = -newDis;   // set the shortest distance
+				marked[newP.y][newP.x] = 1;            // mark the point
+				father[newP.y][newP.x] = p.second;     // set father of neighbor as point in p
+			}
+		}
+	}
+
+	delete obsData;
+	for(int i = 0; i < height; i++)
+		delete [] marked[i];
+	delete [] marked;
+}
+
+void
+OgMap::getShortestPath(std::vector<Vector2d> & path, Vector2d pos)
+{
+	std::vector<CvPoint> pixelPath;
+	CvPoint p = getPositionInPixelPoints(pos);
+	if( p.x < 0 || p.x > width-1 || p.y < 0 || p.y > height-1 )
+		return;
+//	Vector2d test = getPositionInMeters(p.x,p.y);
+//	std::cout << "getting shorTest path to : " << test.x << "," << test.y << std::endl;
+	getShortestPathInPixels(pixelPath, p);
+
+//	mapImage->show();
+	//mapImage->drawAndDisplay(pixelPath);
+	
+	std::vector<CvPoint>::reverse_iterator rit;
+	int skip = 0.1/metersPerCellX;
+	
+ 	for( rit = pixelPath.rbegin(); rit < pixelPath.rend(); rit+=skip )  
+ 	{
+ 		Vector2d vv = getPositionInMeters((*rit).x, (*rit).y);
+// 		std::cout << vv.x << "," << vv.y << " ";		
+ 		path.push_back( vv );
+ 	}
+	rit = pixelPath.rend();
+	rit--;	 
+	path.push_back( getPositionInMeters((*rit).x, (*rit).y) );  // add the final target point
+//	std::cout << std::endl;
+}
+
+void
+OgMap::getShortestPathInPixels(std::vector<CvPoint> & path, CvPoint p)
+{
+	CvPoint parent;
+	CvPoint end = p;
+	if( distances[p.y][p.x] == DBL_MAX )  // if the distance is infinite, meaning inaccessible, return an empty path
+		return;
+	
+	path.push_back(end);
+	std::cout << std::endl;
+	while(true)
+	{
+		parent = father[end.y][end.x];
+		if( parent.x == -1 || parent.y == -1 )
+			break;
+		path.push_back(parent);
+		end = parent;
+	}
+//	path.pop_back();    // delete the last element, since it is the current position of the robot
+}
+
+// void
+// OgMap::calculateShortestDistances(const Vector2d & pos)
+// {
+//  	std::priority_queue<std::pair<double,CvPoint>,
+// 		std::vector<std::pair<double,CvPoint> >,
+// 		std::less<std::vector<std::pair<double,CvPoint> >::value_type> > q;
+//  	std::pair<double,CvPoint> tmp;
+//  	int i,j;
+	
+//  	for(int i = 0; i < height; i++)   // i stands for row in the image
+//  	{
+//  		for(int j = 0; j < width; j++)
+//  		{
+//  			visit[i][j] = false;
+//  			distances[i][j] = DBL_MAX;
+//  			father[i][j] = cvPoint(0,0);
+//  		}
+//  	}
+
+//  	CvPoint pp = getPositionInPixelPoints(pos);  // y is the row
+//  	distances[pp.y][pp.x] = 0;
+//  	q.push(std::pair<double,CvPoint>(distances[pp.y][pp.x], pp));	
+
+//  	CvPoint newP;
+//  	while(!q.empty())
+//  	{
+// 		std::cout << "queue is not empty" << std::endl;
+//  		tmp = q.top();
+//  		q.pop();
+//  		newP = tmp.second;
+//  		if( !visit[newP.y][newP.x] )  // if this node(pixel) is not visited
+//  		{
+//  			visit[newP.y][newP.x] = true;
+//  			for( i = 0; i < height; i++ )
+//  			{
+//  				for( j = 0; j < width; j++ )  // check this for each element
+//  				{
+//  					double newdist = getGraphDistance(newP, cvPoint(i,j));
+//  					if( !visit[i][j] &&
+//  						distances[newP.y][newP.x] + newdist < distances[i][j])
+//  					{
+//  						distances[i][j] = distances[newP.y][newP.x] + newdist;
+//  						q.push(std::pair<double,CvPoint>(-distances[i][j],
+//  													  cvPoint(i,j)));
+//  						father[i][j] = newP;
+//  					}
+//  				}
+//  			}
+//  		}		
+//  	}
+// }
+
+double
+OgMap::getShortestDistanceToInMeters(const Vector2d & p)
+{
+	CvPoint pp = getPositionInPixelPoints(p);
+	double pixelDistance = getShortestDistanceToInPixels(pp);
+	return (pixelDistance == DBL_MAX) ? DBL_MAX : pixelDistance*metersPerCellX;  // assume X and Y resolution are same, which is the case most of the time
+}
+
+double
+OgMap::getShortestDistanceToInPixels(const CvPoint& p)
+{
+	if( p.x < 0 || p.x >= width || p.y < 0 || p.y >= height )
+		return DBL_MAX;
+	return distances[p.y][p.x];
+}
+
+unsigned char
+OgMap::getMapVal(int row, int col)
+{
+	return data[row][col];
+}
+
+void
+OgMap::displayMap()
+{
+	char name[64];
+	sprintf(name, "%f-%f", offsetX, offsetY);
+	cvNamedWindow(name);
+	cvShowImage(name, mapImage->getIplImage());
+
+	cvWaitKey(0);
+
+	cvDestroyWindow(name);
+}
+
+void
+OgMap::displayShortestDistanceAsMap(/*mrbot::Logger* logger*/)
+{
+// 	std::string msg("printing shortest distance values");
+// 	logger->log(msg);
+// 	std::stringstream ss;
+	
+	unsigned char data[width*height];
+	int k = 0;
+
+	double limit = sqrt(width*width + height*height);
+	
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+//			tr("");
+//			ss << distances[i][j];
+//			logger->log(ss.str());
+			data[k++] = (distances[i][j] == DBL_MAX)? 254 : ((char)((limit*distances[i][j])/200));
+			//std::cout << (int)data[k-1] << " ";
+			//std::cout << distances[i][j] << " ";
+		}
+		//std::cout << std::endl;
+	}
+
+	IplImage* disImage = cvCreateImage( cvSize(width, height), IPL_DEPTH_8U, 1);
+	disImage->origin = 1;
+	disImage->widthStep = width;
+	memcpy(disImage->imageData, data, width*height);
+
+	cvNamedWindow("distance image");
+	cvShowImage("distance image", disImage);
+
+	cvWaitKey(0);
+
+	cvDestroyWindow("distance image");
+
+	cvReleaseImage(&disImage);
+}
+
+void
+OgMap::saveMap(int sequenceNo)
+{
+	char name[64];
+
+	struct tm* timeInfo;
+	time_t rawtime;
+
+	time(&rawtime);
+	timeInfo = localtime(&rawtime);
+	int year = 1900 + timeInfo->tm_year;
+	int month = 1 + timeInfo->tm_mon;
+	int day = timeInfo->tm_mday;
+	int hour = timeInfo->tm_hour;
+	int min = timeInfo->tm_min;
+	int sec = timeInfo->tm_sec;
+
+	sprintf(name, "map-%d-%d-%d-%d-%d-%d-%d.jpg",
+			sequenceNo, year, month, day, hour, min, sec);
+
+	IplImage* img2 = mapImage->getIplImage();
+	IplImage* svim = cvCreateImage(cvSize(img2->width, img2->height), IPL_DEPTH_8U, 1);
+	svim->origin = 1;
+	svim->widthStep = img2->widthStep;
+//	memcpy(img2->imageData)
+
+	int size = img2->widthStep*img2->height;
+	for(int i = 0; i < size; i++)
+	{
+		svim->imageData[i] = (char)(255 - img2->imageData[i]);
+	}
+	
+	cvSaveImage(name, svim);
+
+	cvReleaseImage(&svim);
+}
+
+double
+OgMap::getExploredFraction(const std::vector< Vector2d > & pathHistory)
+{
+	double resNumerator = (int)round(metersPerCellX*100.0);
+	double resDenominator = 100.0;
+
+	std::vector<CvPoint> phPoints;
+	for(unsigned int i = 0; i < pathHistory.size(); i++)
+	{
+		CvPoint p;
+		p.x = (pathHistory[i].x - offsetX)*resDenominator/resNumerator;
+		p.y = (pathHistory[i].y - offsetY)*resDenominator/resNumerator;
+
+		phPoints.push_back(p);
+	}	
+
+	return mapImage->getExploredFraction(phPoints);
+}
+
+void
+OgMap::displayDistanceMap()
+{
+	unsigned char tdata[width*height];
+	int k = 0;
+
+	//double limit = sqrt(width*width + height*height);
+	double limit = width;
+
+	for(int i = 0; i < height; i++)
+		for(int j = 0; j < width; j++)
+			tdata[k++] = (distances[i][j] == DBL_MAX)? 254 : ( ( 253*( (distances[i][j] < limit)? distances[i][j]/limit : 1.0 ) ) );
+
+	IplImage* disImage = cvCreateImage( cvSize(width, height), IPL_DEPTH_8U, 1);
+	disImage->origin = 1;
+	disImage->widthStep = width;
+	memcpy(disImage->imageData, tdata, width*height);
+
+	cvNamedWindow("distance image");
+	cvShowImage("distance image", disImage);
+	
+	cvNamedWindow("dilated map");
+	cvShowImage("dilated map", mapImage->getObsDilatedMap() );
+
+	cvWaitKey(0);
+
+	cvDestroyWindow("distance image");
+	cvDestroyWindow("dilated map");
+
+	cvReleaseImage(&disImage);
+}
+
+double
+OgMap::getInformationGain(int x, int y, int range)
+{
+	IplImage* im = mapImage->getIplImage();
+
+	int w = im->widthStep;
+	int h = im->height;
+
+	int b = (y - range) < 0 ? 0 : (y-range);
+	int t = (y + range) >= h ? h-1 : (y+range);
+	int l = (x - range) < 0 ? 0 : (x - range);
+	int r = (x + range) >= w ? w-1 : (x + range);
+
+	int totalcells = 0;
+	int uncells = 0;
+	CvScalar val;
+	for(int i = b; i <= t; i++)
+	{
+		for(int j = l; j <= r; j++)
+		{
+			if( sqrt( (x-j)*(x-j) + (y-i)*(y-i) ) > double(range) )
+				continue;
+
+			totalcells++;
+			val = cvGet2D(im, i, j);
+			if(val.val[0] > 85 && val.val[0] < 201)
+			{
+				uncells++;
+			}
+		}
+	}
+
+	return (double(uncells))/(double(totalcells));
+}
+
+void
+OgMap::addInflatedObsLayer(std::vector<mapprocessing::Vector2d> & inflated_layer)
+{
+	std::vector<mapprocessing::Vector2d>::iterator it;
+	std::vector<CvPoint> inflatedPoints;
+	for(it = inflated_layer.begin(); it != inflated_layer.end(); it++)
+	{
+		Vector2d v = *it;
+		CvPoint p;
+		p.x = (int)floor(( v.x - this->offsetX )/metersPerCellX);
+		p.y = (int)floor(( v.y - this->offsetY )/metersPerCellY);
+		if( p.x < 0 || p.x > width-1 || p.y < 0 || p.y > height-1 )
+			continue;
+		inflatedPoints.push_back(p);
+	}
+	mapImage->addInflatedObsLayer(inflatedPoints);
+}

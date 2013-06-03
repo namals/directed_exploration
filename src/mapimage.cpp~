@@ -1,0 +1,680 @@
+#include <directed_exploration/mapprocessing/mapimage.h>
+#include <directed_exploration/mapprocessing/mapexception.h>
+#include <directed_exploration/mapprocessing/pointset.h>
+
+#include <cstring>
+#include <cfloat>
+#include <iostream>
+#include <algorithm>
+
+#include <vector>
+
+using namespace mapprocessing;
+
+bool cmp(CvPoint, CvPoint);
+
+namespace mapprocessing
+{	
+	const double PI = 3.141592;
+	const double FOV = PI;
+	const double RESOLUTION = PI/180;
+}
+
+MapImage::MapImage(char* data, int width, int height, float resolutionX, float resolutionY, double obs_inflation_dis, double frontier_clearance_dis)
+{
+	if(resolutionX < resolutionY)
+		resolution = resolutionX;
+	else
+		resolution = resolutionY;
+
+	this->obs_inflation_dis = obs_inflation_dis;
+	this->frontier_clearance_dis = frontier_clearance_dis;
+
+	img = cvCreateImage( cvSize(width, height), IPL_DEPTH_8U, 1);
+	img->origin = 1;
+	img->widthStep = width;
+
+	obstacleImg = cvCreateImage( cvSize(width, height), IPL_DEPTH_8U, 1);
+	obstacleImg->origin = 1;
+	obstacleImg->widthStep = width;
+	
+	//cvSetData(img, data, width);
+	memcpy(img->imageData, data, width*height);
+
+	IplImage* imgFreeSpace = cvCreateImage(cvSize(img->width, img->height),
+ 										   IPL_DEPTH_8U,
+ 										   1);
+ 	imgFreeSpace->origin = 1;
+ 	imgFreeSpace->widthStep = img->widthStep;
+ 	cvThreshold(img, imgFreeSpace, 73, 127, CV_THRESH_BINARY);
+
+	IplImage* imgWithObstacles = cvCreateImage(cvSize(img->width, img->height),
+ 											   IPL_DEPTH_8U,
+ 											   1);
+ 	imgWithObstacles->origin = 1;
+ 	imgWithObstacles->widthStep = img->widthStep;
+	cvThreshold(img, imgWithObstacles, 127, 254, CV_THRESH_BINARY);
+
+	//cvDilate(imgWithObstacles, imgWithObstacles, NULL, int(ceil(obs_inflation_dis/resolutionX)) ); // hardcoding robot radius to be 0.35m
+	inflateObstacles(imgWithObstacles, obs_inflation_dis/resolutionX);
+ 	cvAdd(imgFreeSpace,imgWithObstacles,obstacleImg);
+
+	cvReleaseImage(&imgFreeSpace);
+	cvReleaseImage(&imgWithObstacles);
+}
+
+MapImage::~MapImage()
+{
+	cvReleaseImage(&img);
+	cvReleaseImage(&obstacleImg);
+}
+
+void MapImage::show()
+{
+	cvNamedWindow("map", CV_WINDOW_AUTOSIZE);
+	cvMoveWindow("map", 100,100);
+	
+	cvShowImage("map", img);
+	
+	cvWaitKey(0);
+}
+
+void MapImage::show(char *wname, int pixelx, int pixely)
+{
+	cvNamedWindow(wname, CV_WINDOW_AUTOSIZE);
+	cvMoveWindow(wname, pixelx, pixely);
+	cvShowImage(wname, img);
+	std::cout << img->width << ", " << img->height << ", " << (int)img->imageData[0] << std::endl;
+	cvWaitKey(3);
+}
+
+void
+MapImage::show(IplImage* dispImg, char *wname, int pixelx, int pixely, int delay)
+{
+	cvNamedWindow(wname, CV_WINDOW_AUTOSIZE);
+	cvMoveWindow(wname, pixelx, pixely);
+	cvShowImage(wname, dispImg);
+	cvWaitKey(delay);
+}
+
+void
+MapImage::drawAndDisplay(std::vector<CvPoint> & ps)
+{
+	IplImage* img2 = cvCreateImage( cvSize(img->widthStep, img->height), IPL_DEPTH_8U, 1);
+	img2->origin = 1;
+	img2->widthStep = img->widthStep;
+	cvCopy(img,img2);
+
+	IplImage* img3= cvCreateImage( cvSize(2*img->widthStep, 2*img->height), IPL_DEPTH_8U, 1);
+	img3->origin = 1;
+	img3->widthStep = 2*img->widthStep;
+	
+	for(unsigned int i = 0; i < ps.size(); i++)
+	{
+		img2->imageData[ps[i].y*img->widthStep + ps[i].x] = 254;
+	}
+
+	cvResize(img2, img3);
+	cvNamedWindow("drawanddisplay", CV_WINDOW_AUTOSIZE);
+	cvMoveWindow("drawanddisplay", 370,600);	
+	cvShowImage("drawanddisplay", img3);
+
+	cvWaitKey(0);
+	
+	cvReleaseImage(&img2);
+	cvReleaseImage(&img3);
+}
+
+
+// void
+// MapImage::getFrontiers(std::vector<CvPoint> & frontiers, int robotRadius)
+// {
+// 	IplImage* imgWithAllEdges = cvCreateImage(cvSize(img->width, img->height),
+// 								   IPL_DEPTH_8U,
+// 								   1);
+// 	imgWithAllEdges->origin = 1;
+// 	imgWithAllEdges->widthStep = img->widthStep;
+
+// 	IplImage* imgWithObstacles = cvCreateImage(cvSize(img->width, img->height),
+// 											   IPL_DEPTH_8U,
+// 											   1);
+// 	imgWithObstacles->origin = 1;
+// 	imgWithObstacles->widthStep = img->widthStep;	
+
+
+// 	IplImage* imgAllEdges = cvCreateImage(cvSize(img->width, img->height),
+// 										  IPL_DEPTH_8U,
+// 										  1);
+// 	imgAllEdges->origin = 1;
+// 	imgAllEdges->widthStep = img->widthStep;
+	
+// 	IplImage* imgObstacleEdges = cvCreateImage(cvSize(img->width, img->height),
+// 											   IPL_DEPTH_8U,
+// 											   1);
+// 	imgObstacleEdges->origin = 1;
+// 	imgObstacleEdges->widthStep = img->widthStep;
+
+// 	IplImage* imgFrontiers = cvCreateImage(cvSize(img->width, img->height),
+// 										   IPL_DEPTH_8U,
+// 										   1);
+	
+// 	imgFrontiers->origin = 1;
+// 	imgFrontiers->widthStep = img->widthStep;
+
+// 	IplImage* imgFreeSpace = cvCreateImage(cvSize(img->width, img->height),
+// 										   IPL_DEPTH_8U,
+// 										   1);
+// 	imgFrontiers->origin = 1;
+// 	imgFrontiers->widthStep = img->widthStep;
+// 	cvThreshold(img, imgFreeSpace, 73, 127, CV_THRESH_BINARY);
+
+// //	show(img, "orimap", 200, 200, 3);
+
+// 	// truncate values over 126 to get every edge
+// 	cvThreshold(img, imgWithAllEdges, 60, 255, CV_THRESH_BINARY);
+
+//  	// truncate values to get only the obstacles
+//  	cvThreshold(img, imgWithObstacles, 160, 255, CV_THRESH_BINARY);
+// 	cvDilate(imgWithObstacles, imgWithObstacles, NULL, robotRadius);
+// 	cvAdd(imgFreeSpace,imgWithObstacles,obstacleImg);
+// //	show(imgWithObstacles, "obstacles", 370, 200, 3);
+
+//  	// edge detect for imgWithAllEdges
+//  	cvCanny(imgWithAllEdges, imgAllEdges, 120, 120*3, 3);
+// //	show(imgAllEdges, "alledges", 200, 370, 3);
+
+//  	// edge detect for imgWithObstacles
+// // 	cvCanny(imgWithObstacles, imgObstacleEdges, 120, 120*3, 3);
+
+//  	// subtract the two edge detected images
+//  	cvSub(imgAllEdges, imgWithObstacles, imgFrontiers);
+
+// 	//cvAdd(imgFreeSpace,imgWithObstacles,obstacleImg);
+	
+// //	show(imgFrontiers, "frontiers", 370, 370, 3);
+// //	show(obstacleImg, "obimg", 600, 600, 3);
+
+
+// 	//display imgFrontiers;
+// // 	if( img->widthStep > 100 )
+// // 	{
+
+// //	cvWaitKey(0);
+
+// 	cvDestroyWindow("orimap");
+// 	cvDestroyWindow("obstacles");
+// 	cvDestroyWindow("alledges");
+// 	cvDestroyWindow("frontiers");
+// 	cvDestroyWindow("obimg");
+// // 	}
+
+// 	CvMemStorage* storage = cvCreateMemStorage();
+// 	CvSeq* first_contour = NULL;
+// 	int noOfContours = cvFindContours(imgFrontiers, storage, &first_contour, sizeof(CvContour),
+// 									  CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+
+// //	std::cout << "no of contours found : " << noOfContours << std::endl;	
+
+//  	int thresholdInMeters = FRONTIER_CONTOUR_LENGTH_LOWER_THRESHOLD;
+//  	const int threshold = (int)(thresholdInMeters/resolution);
+// 	int frontierSeparation = (int)(thresholdInMeters/resolution);
+	
+// 	for(CvSeq* c =  first_contour; c != NULL; c = c->h_next)
+// 	{
+// 		std::vector<CvPoint> v;
+// // 		if( img->widthStep > 100 )
+// // 		{
+// // 			std::cout << "contour length : " << c->total << std::endl;
+// // 		}
+
+
+// 		// frontier selection for waiting time
+// 		for(int i = 0; i < c->total; i++)
+// 		{
+// 			CvPoint* p = CV_GET_SEQ_ELEM(CvPoint, c, i);
+// 			CvPoint newTP;
+// 			if( checkForFreeCell(*p,6,newTP) == true )
+// 				frontiers.push_back(newTP);
+// 		}
+
+		
+
+// 		// the one used normally
+		
+// // 		if( c->total > threshold ) // this threshold should be dynamically calculated, based on cells per meter
+// // 		{
+// // 			for(int i = 0; i < c->total; i++)
+// //  			{
+// //  				CvPoint* p = CV_GET_SEQ_ELEM(CvPoint, c, i);
+// //  				v.push_back(*p);
+// //  			}
+			
+// // 			int fs = (int)floor((double)c->total/frontierSeparation);
+// // 			for(int k = 0, l = 0; k < fs; k++, l = l+frontierSeparation)
+// // 			{
+// // 				int centerIn;
+// // 				if( k == fs-1 || k == 0 )  // because fs could be zero
+// // 					centerIn = l + (c->total - l)/2;
+// // 				else
+// // 					centerIn = l + frontierSeparation/2;
+
+// // 				CvPoint tp = v[centerIn];
+// // 				CvPoint newTP;
+// // 				if( checkForFreeCell(tp,6,newTP) == true )
+// // 					frontiers.push_back(newTP);
+// // 			}			
+
+// // // 			sort(v.begin(), v.end(), cmp);
+// // // 			int centerIn = c->total/2;			
+// // // 			// check if the pixel at centerIn belongs to free space
+// // // 			CvPoint tp = checkForFreeCell(v[centerIn]);						
+// //   		}
+// 	}
+
+// 	cvReleaseImage(&imgWithAllEdges);
+// 	cvReleaseImage(&imgWithObstacles);
+// 	cvReleaseImage(&imgAllEdges);
+// //	cvReleaseImage(&imgObstacleEdges);
+// 	cvReleaseImage(&imgFrontiers);
+// 	cvReleaseMemStorage(&storage);
+// }
+
+void
+MapImage::inflateObstacles(IplImage* imgWithObstacles, double inflation_radius)
+{
+	std::priority_queue<CellData> inflation_queue;
+	unsigned char marked[imgWithObstacles->widthStep*imgWithObstacles->height];	
+	for(int i = 0; i < imgWithObstacles->widthStep*imgWithObstacles->height; i++)      // initialize the queue
+	{		
+		if( static_cast<unsigned int>(imgWithObstacles->imageData[i]) > 200 )
+		{
+			int x = i%imgWithObstacles->widthStep; 
+			int y = i/imgWithObstacles->widthStep;
+			CellData cell(0.0, i, x, y, x, y);
+			inflation_queue.push(cell);
+			marked[i] = 1;   // all obstacles are marked
+		}
+		else
+			marked[i] = 0;
+	}
+
+	while(!inflation_queue.empty())
+	{
+		const CellData& current_cell = inflation_queue.top();
+
+		unsigned int index = current_cell.index_;
+		unsigned int mx = current_cell.x_;
+		unsigned int my = current_cell.y_;
+		unsigned int sx = current_cell.src_x_;
+		unsigned int sy = current_cell.src_y_;
+
+		//attempt to put the neighbors of the current cell onto the queue                                                                                      
+		if(mx > 0)
+			enqueue(index - 1, mx - 1, my, sx, sy, inflation_queue, &(marked[index-1]), inflation_radius );
+		if(my > 0)
+			enqueue(index - imgWithObstacles->widthStep, mx, my - 1, sx, sy, inflation_queue, &(marked[index - imgWithObstacles->widthStep]), inflation_radius );
+		if(mx < imgWithObstacles->widthStep - 1)
+			enqueue(index + 1, mx + 1, my, sx, sy, inflation_queue, &(marked[index + 1]), inflation_radius );
+		if(my < imgWithObstacles->height - 1)
+			enqueue(index + imgWithObstacles->widthStep, mx, my + 1, sx, sy, inflation_queue, &(marked[index + imgWithObstacles->widthStep]), inflation_radius );
+
+		//remove the current cell from the priority queue        
+		inflation_queue.pop();
+		imgWithObstacles->imageData[index] = 254;  // inflation in image
+	}
+}
+
+void
+MapImage::getFrontiers(std::vector<CvPoint> & frontiers, int robotRadius)
+{
+	int height = img->height;
+	int width = img->widthStep;	
+
+	CvPoint offset[8];
+	offset[0].x = 0; offset[0].y = +1; offset[1].x = +1; offset[1].y = +1; offset[2].x = +1; offset[2].y = 0; offset[3].x = +1; offset[3].y = -1;
+	offset[4].x = 0; offset[4].y = -1; offset[5].x = -1; offset[5].y = -1; offset[6].x = -1; offset[6].y = 0; offset[7].x = -1; offset[7].y = +1;
+
+	// fillHolesInFreeSpace();
+
+	//std::vector<CvPoint> fv;
+	for(int i = 0; i < height; i++)
+	{
+		for(int j = 0; j < width; j++)
+		{
+			if(!IS_FREE( (static_cast<unsigned int>(img->imageData[i*width+j])) ) )
+				continue;
+
+			bool isfrontier = false;
+			for(int k = 0; k < 8; k++) // search through all 8-connected neighbors
+			{
+				CvPoint pnew; pnew.x = j + offset[k].x; pnew.y = i + offset[k].y;
+				if( pnew.x < 0 || pnew.x > width-1 || pnew.y < 0 || pnew.y > height-1)
+					continue;
+				if( IS_UNKNOWN( (static_cast<unsigned int>(img->imageData[pnew.y*width + pnew.x])) ) )
+				{
+					isfrontier = true;
+					break;
+				}
+			}
+			if(isfrontier)  // check for safe distance from an obstacle
+			{
+				for(int l = -robotRadius; l <= robotRadius; l++)
+				{
+					for(int m = -robotRadius; m <= robotRadius; m++)
+					{
+						if( (i+l) < 0 || (i+l) > (height-1) || (j+m) < 0 || (j+m) > (width-1) )
+							continue;
+						double dis = sqrt( (l)*(l) + (m)*(m) );
+						if( dis > (double)robotRadius )
+							continue;
+						CvPoint pnew; pnew.x = j+m; pnew.y = i+l;
+						if( IS_OCCUPIED( (static_cast<unsigned int>(img->imageData[pnew.y*width+pnew.x]))) )
+						{
+							isfrontier = false;
+							break;
+						}
+					}
+					if(!isfrontier)
+						break;
+				}
+			}
+			if( isfrontier )
+			{				
+				frontiers.push_back(cvPoint(j,i)); // j is x coordinate
+			}
+		}
+	}
+}
+
+void MapImage::printImageData()
+{
+	if( img == NULL )
+		return;
+
+	for( int i = 0; i < img->height; i++ )
+	{
+		for(int j = 0; j < img->width; j++)
+			std::cout << (int)img->imageData[i*img->widthStep + j] << ", ";
+	}
+	std::cout << std::endl;
+}
+
+IplImage*
+MapImage::getIplImage()
+{
+	return img;
+}
+
+bool
+MapImage::checkForFreeCell(const CvPoint& p, int range, CvPoint& newP/*out*/) // range is in pixels
+{
+	const double PI = 3.14159;
+
+	// generate the boundaries of the neighboring box
+	CvPoint bl,tr;
+	bl.x = ( (p.x - range) < 0 ) ? 0 : (p.x-range);
+	bl.y = ( (p.y - range) < 0 ) ? 0 : (p.y-range);
+	tr.x = ( (p.x + range) > (img->widthStep-1) ) ? img->widthStep-1 : p.x + range;
+	tr.y = ( (p.y + range) > (img->height-1) ) ? img->height-1 : p.y + range;
+
+	// calculate the mean attraction vector by the free space on the point
+	int n=0;
+	double theta_i, mu_theta, sum_theta;
+	for(int i = bl.x; i <= tr.x; i++)
+	{
+		for(int j = bl.y; j <= tr.y; j++)
+		{
+			theta_i= atan2(j-p.y, i-p.x);
+			n++;
+			if((unsigned char)obstacleImg->imageData[j*obstacleImg->widthStep + i] <= 73 )
+			{				
+				sum_theta += theta_i;				
+			}
+			else
+			{
+				if(theta_i > 0)
+					sum_theta += (theta_i - PI);
+				else if(theta_i <= 0)
+					sum_theta += (PI + theta_i);
+			}
+		}
+	}
+	mu_theta = sum_theta/n; // mean attraction vector angle
+
+	double delta = atan2(0.5,double(range));   // tolerance angle
+	double x_1, y_1;                           // coordinate increment variables
+	double m = (( (-PI/2-delta) <= mu_theta && mu_theta  <= (-PI/2+delta) ) ||
+				( (PI/2-delta) <= mu_theta && mu_theta <= (PI/2+delta) ) ) ? DBL_MAX : tan(mu_theta);  // tangent of the mean line
+
+	// calculate the individual increment values for x and y coordinates
+	if( (-PI/2 + delta) < mu_theta && mu_theta < (PI/2 - delta) )
+	{	x_1 = 0.8/sqrt(1+(m*m)); y_1 = m*x_1; } 
+	else if( (PI/2 + delta) < mu_theta || mu_theta < (-PI/2 - delta) )
+	{   x_1 = -0.8/sqrt(1+(m*m)); y_1 = m*x_1; }
+	else if( (PI/2 - delta) <= mu_theta && mu_theta <= (PI/2 + delta) )
+	{   x_1 = 0; y_1 = 1; }
+	else
+	{   x_1 = 0; y_1 = -1; }
+
+	double x = p.x + 0.5;
+	double y = p.y + 0.5;
+	double limit = sqrt(2.0)*range;
+	double len = 0;
+	double lenincr = sqrt(x_1*x_1 + y_1*y_1);
+	int xi, yi;
+	int count = 0;
+	while( len <= limit )
+	{
+		x = x + x_1;
+		y = y + y_1;
+		xi = (int)floor(x);
+		yi = (int)floor(y);
+		if( xi < 0 || xi > img->width-1 || yi < 0 || yi > img->height -1 )
+			break;
+		if( (unsigned char)obstacleImg->imageData[yi*obstacleImg->widthStep + xi] <= 73 )
+			count++;
+		else
+			count = 0;
+		if( count == 3 )
+		{
+			newP.x = xi;
+			newP.y = yi;
+			return true;
+		}
+
+		len += lenincr;
+	}
+
+//	std::cout << "error in finding a free cell : really?" << std::endl;
+	return false;
+}
+
+double
+MapImage::getExploredFraction(std::vector<CvPoint> & pathHistory)
+{
+	CvScalar p;	
+	// then also find trapped gray parts, make them zero too	
+	IplImage* im2 = cvCreateImage(cvSize(img->width,img->height), IPL_DEPTH_8U, 1);
+	im2->widthStep = img->widthStep;
+	cvCopy(img, im2);
+
+	// consider mapped obstacles (180-255) as zeros, so all explored cells are represented
+	// in a single continous interval
+	cvThreshold(img, img, 180, 254, CV_THRESH_TOZERO_INV);
+	// truncate values to get only obstacles
+	cvThreshold(im2, im2, 180, 254, CV_THRESH_BINARY);
+	cvDilate(im2, im2);   
+
+	bool found = false;
+	CvPoint point;
+	unsigned int i = 0;
+	for(i = 0; i < pathHistory.size()-1; i++)
+	{
+		p = cvGet2D(im2, pathHistory[i].y, pathHistory[i].x);		
+		if( ((unsigned int)p.val[0]) < 73 )
+		{
+			point.x = pathHistory[i].x;
+			point.y = pathHistory[i].y;
+			found = true;
+			break;
+		}			
+	}
+
+	if( !found && i == 0 )
+	{
+		point.x = pathHistory[0].x;
+		point.y = pathHistory[0].y;
+		found = true;
+	}
+
+	if( !found )
+	{
+		std::string msg("error in finding a seed point to make map qt ready");
+		std::cout << msg << std::endl;
+		throw MapException(msg.c_str());
+	}			
+		
+	cvFloodFill(im2, point, cvScalar(127));
+
+	std::vector<int> dx;
+	std::vector<int> dy;
+	std::vector<CvPoint> neighbors;
+	PointSet pointSet;
+	
+	for(int i = 0; i < img->height; i++)
+	{
+		dy.push_back(0);
+		if(i == 0)			
+			dy.push_back(1);
+		else if(i == img->height-1)
+			dy.push_back(-1);
+		else
+		{
+			dy.push_back(-1);
+			dy.push_back(1);
+		}
+		for(int j = 0; j < img->width; j++)
+		{
+//			p = cvGet2D(im4,i,j);
+			dx.push_back(0);
+			if( j == 0 )
+				dx.push_back(1);
+			else if(j == img->width-1)
+				dx.push_back(-1);
+			else
+			{
+				dx.push_back(-1);
+				dx.push_back(1);
+			}
+			p = cvGet2D(im2,i,j);
+			if( (unsigned int)p.val[0] == 0)  // trapped gray cells
+			{
+				//cvSet2D(img, i, j, p); // set its neighbors too
+				for(unsigned int k = 0; k < dy.size(); k++)
+				{
+					for(unsigned int l = 0; l < dx.size(); l++)
+					{
+						//cvSet2D(img, i+dy[k], j+dx[l], p);
+						//neighbors.push_back(cvPoint(j+dx[l],i+dy[k]));
+						pointSet.addPoint(cvPoint(j+dx[l],i+dy[k]));
+					}
+				}
+			}
+			dx.clear();
+		}
+		dy.clear();
+	}
+
+	pointSet.getPointsList(&neighbors);
+	std::cout << "updating trapped pixels : " << neighbors.size() << std::endl;
+	for(unsigned int i = 0; i < neighbors.size(); i++)
+	{
+		CvPoint pp = neighbors[i];
+		cvSet2D(img, pp.y, pp.x, cvScalar(0));
+	}
+
+ 	if( neighbors.size() == (unsigned int)(img->widthStep*img->height)*0.5 ) // if more than 50% of the area is found as trapped, then something is wrong
+ 	{
+		std::cout << point.x << "," << point.y << " - " << (int)im2->imageData[point.y*im2->widthStep + point.x] << std::endl;
+		
+		cvNamedWindow("make1");
+    	cvNamedWindow("make2");
+    	cvShowImage("make1", im2);
+    	cvWaitKey(0);
+
+		cvShowImage("make2", im2);
+    	cvWaitKey(0);
+		
+// 		cvNamedWindow("make3");
+//     	cvShowImage("make3", img);
+//     	cvWaitKey(0);
+
+		cvDestroyWindow("make1");
+		cvDestroyWindow("make2");
+//		cvDestroyWindow("make3");
+	}
+
+	// little hack to rectify mis-mapping of top most row and right most column
+	for(int j = 0; j < img->width-1; j++)
+	{
+		cvSet2D(img, 0, j, cvGet2D(img, 1, j));
+	}
+	for(int i = 0; i < img->height; i++)
+	{
+		cvSet2D(img, i, img->width-1, cvGet2D(img, i, img->width-2));
+	}
+
+	int count = 0;
+	for(int i = 0; i < img->height; i++)
+	{
+		for(int j = 0; j < img->widthStep; j++)
+		{
+			if( (unsigned int)img->imageData[i*img->widthStep + j] < (unsigned int)50 )
+				count++;
+		}
+	}
+
+	cvReleaseImage(&im2);
+
+	double totalCells = img->height*img->widthStep;
+	return ((double)count/totalCells);
+}
+
+char
+MapImage::operator[](int i)
+{
+	return obstacleImg->imageData[i];  // return the value from dilated obstacle image
+}
+
+const char*
+MapImage::getObsDilatedMapData()
+{
+	return obstacleImg->imageData;
+}
+
+IplImage*
+MapImage::getObsDilatedMap()
+{
+	std::cout <<" getting obstacle dilated map" << std::endl;
+	return obstacleImg;
+}
+
+void
+MapImage::addInflatedObsLayer(std::vector<CvPoint> & inflatedPoints)
+{
+	std::vector<CvPoint>::iterator it;
+	for(it = inflatedPoints.begin(); it != inflatedPoints.end(); it++)
+	{
+		unsigned int index = ((*it).y)*(obstacleImg->widthStep) + (*it).x;
+		if( index > (obstacleImg->widthStep*obstacleImg->height - 1) )
+			continue;
+		obstacleImg->imageData[index] = 254;
+	}
+}
+
+
+bool cmp(CvPoint a, CvPoint b)
+{
+	return a.x < b.x;
+}
+

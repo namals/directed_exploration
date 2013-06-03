@@ -1,0 +1,26 @@
+<package>
+  <description brief="directed_exploration">
+
+     directed_exploration
+
+  </description>
+  <author>techx</author>
+  <license>BSD</license>
+  <review status="unreviewed" notes=""/>
+  <url>http://ros.org/wiki/directed_exploration</url>
+  <depend package="actionlib"/>
+  <depend package="tf"/>
+  <depend package="gmapping"/>
+  <depend package="roscpp"/>
+  <depend package="std_msgs"/>
+  <depend package="nav_msgs"/>
+  <depend package="move_base_msgs"/>
+  <depend package="visualization_msgs"/>
+  <depend package="costmap_2d"/>
+  <depend package="rotate_recovery"/>
+  <depend package="compass"/>
+  <depend package="techx_msgs"/>
+
+</package>
+
+

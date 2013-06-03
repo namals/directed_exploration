@@ -1,0 +1,12 @@
+<launch>
+		<node pkg="directed_exploration" type="de_planner" name="de_planner" output="screen">
+			  <param name="goal_range" value="5.0" />
+			  <param name="goal_bearing" value="145.0" />	
+			  <param name="max_sensor_range" value="5.0"/>
+			  <param name="obs_inflation_dis" value="0.4" />
+			  <param name="frontier_clearance_dis" value="0.55" />  <!-- frontier should be at least half a meter away from obstacle -->
+			  <param name="plan_goal_tolerance" value="0.5" />
+			  <param name="fixed_frame" value="/map" />
+			  <param name="robot_frame" value="/base_link" />
+		</node>
+</launch>

@@ -1,0 +1,96 @@
+#ifndef MAPPROCESSING_MAP_IMAGE_H
+#define MAPPROCESSING_MAP_IMAGE_H
+
+#include <opencv/cv.h>
+#include <opencv/highgui.h>
+
+#include "../util.h"
+
+#include <vector>
+#include <queue>
+
+#define FRONTIER_CONTOUR_LENGTH_LOWER_THRESHOLD 1    // this is in meters
+
+#define IS_FREE( x ) ( (x) < 107 )
+#define IS_UNKNOWN( x ) ( (x) >= 107 && (x) < 148 )
+#define IS_OCCUPIED( x ) ( (x) >= 148 )
+
+namespace mapprocessing
+{
+
+class CellData
+{
+public:
+	/**                                                                                                                                                 		 * @brief  Constructor for a CellData object                                                                                                        		 * @param  d The distance to the nearest obstacle, used for ordering in the priority queue                                                          		 * @param  i The index of the cell in the cost map                                                                                                  		 * @param  x The x coordinate of the cell in the cost map                                                                                           		 * @param  y The y coordinate of the cell in the cost map                                                                                           		 * @param  sx The x coordinate of the closest obstacle cell in the costmap
+	 * @param  sy The y coordinate of the closest obstacle cell in the costmap                                                                          		 * @return                                                                                                                                          		 */
+	CellData(double d, double i, unsigned int x, unsigned int y, unsigned int sx, unsigned int sy) : distance_(d),
+			index_(i), x_(x), y_(y), src_x_(sx), src_y_(sy) {}
+		double distance_;
+		unsigned int index_;
+		unsigned int x_, y_;
+		unsigned int src_x_, src_y_;		
+};
+
+/**                                                                                                                                                     	 * @brief Provide an ordering between CellData objects in the priority queue                                                                            	 * @return We want the lowest distance to have the highest priority... so this returns true if a has higher priority than b                             	 */
+inline bool operator<(const mapprocessing::CellData &a, const mapprocessing::CellData &b){
+	return a.distance_ > b.distance_;
+}
+
+class MapImage
+{
+public:
+	MapImage(char*, int, int, float, float, double, double);  // arr, width, height, resX, resY
+	~MapImage();
+
+	void show();
+	void show(char* wname, int pixelx, int pixely);
+	void show(IplImage* img, char* wname, int pixelx, int pixely, int delay=0);
+	void drawAndDisplay(std::vector<CvPoint> & ps);
+	//std::vector<CvPoint>* getFrontiers();
+	void getFrontiers(std::vector<CvPoint> & frontiers, int robotRadius=1);  // robot radius in pixels
+	IplImage* getIplImage();
+	void addInflatedObsLayer(std::vector<CvPoint> & inflatedPoints);
+
+	void printImageData();
+
+	double getExploredFraction(std::vector<CvPoint> & pathHistory);
+
+	char operator[](int i);
+
+	const char* getObsDilatedMapData();
+	IplImage* getObsDilatedMap();
+	bool checkForFreeCell(const CvPoint& p, int range, CvPoint& newP/*out*/);
+
+	inline void enqueue(unsigned int index, unsigned int mx, unsigned int my,
+						unsigned int src_x, unsigned int src_y, std::priority_queue<mapprocessing::CellData>& inflation_queue, unsigned char* marked, double cell_inflation_radius_){
+        //unsigned char* marked = &markers_[index];
+        //set the cost of the cell being inserted                                                                                                          
+        if(*marked == 0){
+			//we compute our distance table one cell further than the inflation radius dictates so we can make the check below                             
+			double distance = sqrt( (mx-src_x)*(mx-src_x) + (my-src_y)*(my-src_y) );  //distanceLookup(mx, my, src_x, src_y);
+
+			//we only want to put the cell in the queue if it is within the inflation radius of the obstacle point                                          
+			if(distance > cell_inflation_radius_)
+				return;
+
+			//push the cell data onto the queue and mark                                                                                                    
+			mapprocessing::CellData data(distance, index, mx, my, src_x, src_y);
+			inflation_queue.push(data);
+			*marked = 1;
+        }
+	}
+
+private:
+	IplImage* img;
+	IplImage* obstacleImg;
+	float resolution;     // this stands for number of meters per cell	
+
+	double obs_inflation_dis;
+	double frontier_clearance_dis;
+	void inflateObstacles(IplImage* imgWithObstacles, double inflation_radius);
+
+};
+
+}  // ~namespace
+
+#endif
